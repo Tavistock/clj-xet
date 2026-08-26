@@ -1,0 +1,23 @@
+# Clojure build artifacts
+.target/
+target/
+classes/
+
+# REPL and local tooling
+.nrepl-port
+.cpcache/
+.lsp/
+.clj-kondo/.cache/
+.calva/repl.calva-repl
+
+# IDE settings
+.idea/
+.project
+.classpath
+.settings/
+.vscode
+
+# Operating system files
+.DS_Store
+
+example*

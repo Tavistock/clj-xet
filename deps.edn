@@ -1,0 +1,16 @@
+{:paths ["src" "target/classes"]
+
+ :deps/prep-lib
+ {:alias :build
+  :fn compile
+  :ensure "target/classes"}
+
+ :deps {commons-codec/commons-codec {:mvn/version "1.22.1"}
+        org.apache.commons/commons-compress {:mvn/version "1.28.0"}
+        at.yawk.lz4/lz4-java {:mvn/version "1.11.2"}}
+
+
+ :aliases
+ {:dev
+  {:extra-deps {org.clojure/clojure {:mvn/version "1.12.0"}}
+   :extra-paths ["test"]}}}
