@@ -3,9 +3,7 @@
             [clj-xet.gearhash :as gear-hash]
             [clj-xet.util :as util :refer [hash-to-string]]
             [clj-xet.merkle :as merkle]
-            [clj-xet.lz4 :as lz4]
-            [clj-xet.buffer-pool :as bp]
-            [clojure.core.async :as a])
+            [clj-xet.lz4 :as lz4])
   (:import (java.nio ByteBuffer)
            (java.nio.channels WritableByteChannel
                               ReadableByteChannel
@@ -163,20 +161,7 @@
           (.clear buffer)
           (recur offsets))))))
 
-(defn encode2 [^ByteBuffer src ^WritableByteChannel dest]
-  (let [x 10
-        in (a/to-chan! (chunk-lengths src))
-        out (a/chan x)
-        buffer-pool (bp/create-buffer-pool x #(ByteBuffer/allocate (+ 8 max-chunk-size)))]
-    (a/pipeline x out (map (fn [[^long offset ^long length]]
-                             (encode-buffer (.slice src offset length) (bp/get-buffer buffer-pool)))) in)
-    (loop []
-      (when-let [^ByteBuffer compressed (a/<!! out)]
-        (while (.hasRemaining compressed)
-          (.write dest compressed))
-        (.clear compressed)
-        (bp/return-buffer buffer-pool compressed)
-        (recur)))))
+
 
 (comment
   (require '[clj-async-profiler.core :as prof]
