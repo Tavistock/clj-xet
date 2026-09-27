@@ -1,6 +1,7 @@
 (ns clj-xet.util
   (:require [clojure.string])
-  (:import (java.nio.channels FileChannel)
+  (:import (java.nio.channels FileChannel
+                              FileChannel$MapMode)
            (java.nio.file Paths StandardOpenOption)))
 
 (defn spy [x] (prn x) x)
@@ -60,10 +61,14 @@
 
 (defn file-write-channel [file-name]
   (let [path (Paths/get file-name (into-array String []))
-        options (into-array [StandardOpenOption/CREATE
+        options (into-array [StandardOpenOption/READ
+                             StandardOpenOption/CREATE
                              StandardOpenOption/WRITE
                              StandardOpenOption/TRUNCATE_EXISTING])]
     (FileChannel/open path options)))
+
+(defn mapped-read-buffer [^FileChannel in-ch]
+  (.map in-ch FileChannel$MapMode/READ_ONLY 0 (.size in-ch)))
 
 (comment
   (u64-le (byte-array [0x01 0x02 0x03 0x04

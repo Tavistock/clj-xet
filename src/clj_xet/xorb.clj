@@ -1,29 +1,23 @@
 (ns clj-xet.xorb
   (:require [clj-xet.hash :as hash]
-            [clj-xet.gear-hash :as gear-hash]
+            [clj-xet.gearhash :as gear-hash]
             [clj-xet.util :as util :refer [hash-to-string]]
             [clj-xet.merkle :as merkle]
-            [clj-xet.serde :as sd]
-            [clojure.java.io :as io])
-  (:import
-   (java.io InputStream
-            OutputStream)
-   (java.nio ByteBuffer)
-   (java.nio.channels Channels
-                      WritableByteChannel
-                      ReadableByteChannel
-                      FileChannel
-                      FileChannel$MapMode)
-   (net.jpountz.lz4 LZ4FrameInputStream
-                    LZ4FrameOutputStream
-                    LZ4FrameOutputStream$BLOCKSIZE
-                    LZ4FrameOutputStream$FLG$Bits)))
+            [clj-xet.lz4 :as lz4]
+            [clj-xet.buffer-pool :as bp]
+            [clojure.core.async :as a])
+  (:import (java.nio ByteBuffer)
+           (java.nio.channels WritableByteChannel
+                              ReadableByteChannel
+                              FileChannel
+                              FileChannel$MapMode)))
 
 (set! *warn-on-reflection* true)
 (set! *unchecked-math* :warn-on-boxed)
 
 (def max-xorb-size 67108864) ;; 64 MiB maximum raw payload size
 (def max-xorb-chunks 8192)
+(def ^:const max-chunk-size 131072) ;; Maximum chunk size in bytes (128 KiB)
 (def xorb-version 0)
 
 (defn chunk-entries [^FileChannel in-ch]
@@ -39,12 +33,15 @@
                  (+ offset ^long len)
                  (conj acc entry)))))))
 
-(defn chunk-lengths [^FileChannel in-ch]
-  (let [buffer (.map in-ch FileChannel$MapMode/READ_ONLY 0 (.size in-ch))]
-    (into []
-          (take-while
-           (complement zero?)
-           (repeatedly #(gear-hash/buffer-next buffer))))))
+(defn chunk-lengths [^ByteBuffer buffer]
+  (loop [out (transient [])]
+    (if (.hasRemaining buffer)
+      (let [start-offset (.position buffer)
+            len          (gear-hash/buffer-next buffer)]
+        (if (zero? len)
+          (persistent! out)
+          (recur (conj! out [start-offset len]))))
+      (persistent! out))))
 
 (defn chunks-info [^ReadableByteChannel in-ch ^WritableByteChannel out-ch]
   (doseq [{:keys [hash length]} (chunk-entries in-ch)]
@@ -66,95 +63,145 @@
 (def lz4-compression 1)
 #_(def glz4-compression 2)
 
-(def chunk-header-serde
-  (sd/as-composite
-   [:version            (sd/as-le-int 1)
-    :compressed-size    (sd/as-le-int 3)
-    :compression-scheme (sd/as-le-int 1)
-    :uncompressed-size  (sd/as-le-int 3)]))
+(defn get-3-big-end-bytes! [^java.nio.ByteBuffer buf]
+  (let [b1 (Byte/toUnsignedInt (.get buf))
+        b2 (Byte/toUnsignedInt (.get buf))
+        b3 (Byte/toUnsignedInt (.get buf))]
+    (bit-or b1
+            (bit-shift-left b2 8)
+            (bit-shift-left b3 16))))
 
-(defn lz4-uncompress [header ^InputStream in ^OutputStream out]
-  (with-open [zin (-> (.readNBytes in (:compressed-size header))
-                      java.io.ByteArrayInputStream.
-                      LZ4FrameInputStream.)]
-    (.transferTo zin out)))
+(defn get-chunk-header [^java.nio.ByteBuffer buf]
+  (let [version            (bit-and (.get buf) 0xFF)
+        compressed-size    (get-3-big-end-bytes! buf)
+        compression-scheme (bit-and (.get buf) 0xFF)
+        uncompressed-size  (get-3-big-end-bytes! buf)]
+    {:version version
+     :compressed-size compressed-size
+     :compression-scheme compression-scheme
+     :uncompressed-size uncompressed-size}))
 
-(defn no-uncompress [header ^InputStream in ^OutputStream out]
-  (with-open [in2 (io/input-stream (.readNBytes in (:compressed-size header)))]
-    (.transferTo in2 out)))
+(defn no-uncompress [^ByteBuffer src ^ByteBuffer buffer uncompressed-size]
+  (.put buffer (-> src
+                   (.slice)
+                   (.limit uncompressed-size)))
+  (.position src (+ (.position src)
+                    uncompressed-size)))
 
-(defn decode [in-ch out-ch]
-  (with-open [out (Channels/newOutputStream ^WritableByteChannel out-ch)
-              in (-> (Channels/newInputStream ^ReadableByteChannel in-ch)
-                     (java.io.PushbackInputStream.))]
-    (loop []
-      (let [next-byte (.read in)]
-        (when (not= -1 next-byte)
-          (.unread in next-byte)
-          (let [{:keys [compression-scheme
-                        version] :as header} (sd/deserialize chunk-header-serde in)]
-            (when-not (= xorb-version version) (prn header))
-            (when (= xorb-version version)
-              (cond
-                (= compression-scheme lz4-compression) (lz4-uncompress header in out)
-                (= compression-scheme no-compression)  (no-uncompress header in out))
-              (recur))))))))
+(defn decode [^ByteBuffer src ^WritableByteChannel dest]
+  (let [^ByteBuffer buffer (ByteBuffer/allocate max-chunk-size)]
+    (loop [i 0]
+      (when (> (.remaining src) 8)
+        (let [{:keys [compression-scheme
+                      version
+                      uncompressed-size]} (get-chunk-header src)
+              ^ByteBuffer buffer (if (< (.capacity buffer) uncompressed-size)
+                                   (ByteBuffer/allocate uncompressed-size)
+                                   (.limit buffer ^long uncompressed-size))]
+          (when (= xorb-version version)
+            (cond
+              (= compression-scheme lz4-compression) (lz4/read-frame! src buffer)
+              (= compression-scheme no-compression)  (no-uncompress src buffer uncompressed-size))
+            (.flip buffer)
+            (while (.hasRemaining buffer)
+              (.write dest buffer))
+            (.clear buffer)
+            (recur (inc i))))))))
 
-(defn lz4-compress [length ^bytes chunk-bytes]
-  (with-open [baos (java.io.ByteArrayOutputStream.)]
-    (with-open [^LZ4FrameOutputStream lzos (LZ4FrameOutputStream.
-                                            baos
-                                            LZ4FrameOutputStream$BLOCKSIZE/SIZE_256KB
-                                            length
-                                            (into-array [LZ4FrameOutputStream$FLG$Bits/BLOCK_INDEPENDENCE]))]
-      (.write lzos chunk-bytes))
-    {:compressed-length (.size baos)
-     :compressed (.toByteArray baos)}))
+(defn put-3-big-end-bytes! [^java.nio.ByteBuffer buf ^long n]
+  (doto buf
+    (.put (unchecked-byte (bit-and n 0xFF)))
+    (.put (unchecked-byte (bit-and (bit-shift-right n 8) 0xFF)))
+    (.put (unchecked-byte (bit-and (bit-shift-right n 16) 0xFF)))))
 
-(defn pick-compression-scheme-and-compress [length chunk-bytes]
-  (-> (lz4-compress length chunk-bytes)
+(defn put-header ^ByteBuffer
+  [^ByteBuffer dest
+   {:keys [version
+           compressed-size
+           compression-scheme
+           uncompressed-size]}]
+  (doto dest
+    (.put (unchecked-byte version))
+    (put-3-big-end-bytes! compressed-size)
+    (.put (unchecked-byte compression-scheme))
+    (put-3-big-end-bytes! uncompressed-size)))
+
+(defn lz4-compress [^ByteBuffer chunk-bytes ^ByteBuffer buffer]
+  (let [start-pos (.position buffer)]
+    (lz4/write-frame! chunk-bytes buffer)
+    (.flip buffer)
+    {:compressed-length (- (.limit buffer) start-pos)
+     :compressed buffer}))
+
+(defn pick-compression-scheme-and-compress [chunk-bytes buffer]
+  (-> (lz4-compress chunk-bytes buffer)
       (assoc :compression-scheme lz4-compression)))
 
-(defn encode [in-ch out-ch]
-  (with-open [^InputStream in (Channels/newInputStream ^ReadableByteChannel in-ch)
-              ^OutputStream out (Channels/newOutputStream ^WritableByteChannel out-ch)]
-    (doseq [length (chunk-lengths in-ch)]
-      (let [chunk-bytes (.readNBytes in length)
-            {:keys [compression-scheme
-                    compressed-length
-                    compressed]} (pick-compression-scheme-and-compress length
-                                                                       chunk-bytes)
-            header {:version xorb-version
-                    :compressed-size compressed-length
-                    :compression-scheme compression-scheme
-                    :uncompressed-size length}]
-        (sd/serialize chunk-header-serde  out header)
-        (.write out ^bytes compressed)))))
+(defn encode-buffer [^ByteBuffer chunk-bytes ^ByteBuffer dest]
+  (.position dest 8)
+  (let [{:keys [compression-scheme
+                compressed-length]} (pick-compression-scheme-and-compress
+                                     chunk-bytes
+                                     dest)]
+    (.position dest 0)
+    (put-header dest {:version xorb-version
+                      :compressed-size compressed-length
+                      :compression-scheme compression-scheme
+                      :uncompressed-size (.limit chunk-bytes)})
+    (.position dest 0)
+    dest))
+
+(defn encode [^ByteBuffer src ^WritableByteChannel dest]
+  (let [buffer (ByteBuffer/allocate (+ 8 max-chunk-size))]
+    (loop [[[^int offset ^int length] & offsets] (chunk-lengths src)]
+      (if-not length
+        dest
+        (let [chunk-bytes (.slice src offset length)]
+          (encode-buffer chunk-bytes buffer)
+          (while (.hasRemaining ^ByteBuffer buffer)
+            (.write dest buffer))
+          (.clear buffer)
+          (recur offsets))))))
+
+(defn encode2 [^ByteBuffer src ^WritableByteChannel dest]
+  (let [x 10
+        in (a/to-chan! (chunk-lengths src))
+        out (a/chan x)
+        buffer-pool (bp/create-buffer-pool x #(ByteBuffer/allocate (+ 8 max-chunk-size)))]
+    (a/pipeline x out (map (fn [[^long offset ^long length]]
+                             (encode-buffer (.slice src offset length) (bp/get-buffer buffer-pool)))) in)
+    (loop []
+      (when-let [^ByteBuffer compressed (a/<!! out)]
+        (while (.hasRemaining compressed)
+          (.write dest compressed))
+        (.clear compressed)
+        (bp/return-buffer buffer-pool compressed)
+        (recur)))))
 
 (comment
-  (with-open [in (util/file-read-channel csv)
-              out (util/file-write-channel "example")
-              #_#_xin (util/file-read-channel xorb)
-              in2 (util/file-read-channel "example")
-              out2 (util/file-write-channel "example2")]
-    (time (encode in out))
-    (time (decode in2 out2))
-    #_(time (chunks-info in out)))
+  (require '[clj-async-profiler.core :as prof]
+           '[user :refer [time+]]
+           '[clj-xet.constants :refer [csv-file]])
+  (prof/profile
+   {:event :alloc}
+   (dotimes [_ 10]
+     (with-open [^FileChannel in (util/file-read-channel csv-file)
+                 ^FileChannel out (util/file-write-channel "example")
+                 #_#_xin (util/file-read-channel xorb)
+                 ^FileChannel in2 (util/file-read-channel "example")
+                 ^FileChannel out2 (util/file-write-channel "example2")]
+       (prn :start)
+       (time+ (encode (util/mapped-read-buffer in)
+                      out))
+       #_(time+ (encode (util/mapped-read-buffer in)))
+       (time+ (decode (util/mapped-read-buffer in2)
+                      out2)))))
 
-  (with-open [in (util/file-read-channel csv)]
+  (prof/serve-ui 8181)
+
+  (with-open [in (util/file-read-channel csv-file)]
     (time (chunk-lengths in))
-    (time (chunk-entries in))
+    #_(time (chunk-entries in))
     nil)
-
-  (do
-    (def reference "xet-spec-reference-files/")
-    (def xorb-prefix (str reference "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632"))
-    (def xorb (str xorb-prefix ".xorb"))
-    (def xorb-chunks (str xorb-prefix ".xorb.chunks"))
-    (def csv (str reference "Electric_Vehicle_Population_Data_20250917.csv"))
-    (def shard (str csv ".shard"))
-    (def chunk-files [(str reference "099cb228194fe640e36a6c7d274ee5ed3a714ccd557a0951d9b6b43a7292b5d1.chunk")
-                      (str reference "26255591fa803b6baf25d88c315b8a6f5153d5bcfdf18ec5ef526264e0ccc907.chunk")
-                      (str reference "b10aa1dc71c61661de92280c41a188aabc47981739b785724a099945d8dc5ce4.chunk")]))
 
   :end)

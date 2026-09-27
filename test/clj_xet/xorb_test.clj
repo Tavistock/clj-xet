@@ -53,22 +53,17 @@
     (with-open [in (util/file-read-channel xorb-file)
                 source (.source pipe)]
       (let [decode-future (future (with-open [sink (.sink pipe)]
-                                    (xorb/decode in sink)))]
+                                    (xorb/decode (util/mapped-read-buffer in) sink)))]
         (is (= (file-sha csv-file) (channel-sha source)))
         @decode-future))))
 
 (deftest xorb-encode-decode-test
-  (let [encode-pipe (Pipe/open)
-        decode-pipe (Pipe/open)]
+  (let [decode-pipe (Pipe/open)]
     (with-open [in (util/file-read-channel csv-file)
                 decoded-source (.source decode-pipe)]
-      (let [encode-future (future
-                            (with-open [encode-sink (.sink encode-pipe)]
-                              (xorb/encode in encode-sink)))
+      (let [encode (xorb/encode (util/mapped-read-buffer in))
             decode-future (future
-                            (with-open [encode-source (.source encode-pipe)
-                                        decode-sink (.sink decode-pipe)]
-                              (xorb/decode encode-source decode-sink)))]
+                            (with-open [decode-sink (.sink decode-pipe)]
+                              (xorb/decode encode decode-sink)))]
         (is (= (file-sha csv-file) (channel-sha decoded-source)))
-        @encode-future
         @decode-future))))
