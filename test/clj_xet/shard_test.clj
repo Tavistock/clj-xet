@@ -1,15 +1,15 @@
 (ns clj-xet.shard-test
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
-            [clj-xet.shard :as shard])
+            [clj-xet.shard :as shard]
+            [clj-xet.constants])
   (:import (org.apache.commons.codec.digest DigestUtils)
            (java.io ByteArrayOutputStream ByteArrayInputStream)))
 
-(def shard-file "xet-spec-reference-files/Electric_Vehicle_Population_Data_20250917.csv.shard")
-(def dedupe-file    (str shard-file ".dedupe"))
-(def veri-file      (str shard-file ".verification"))
-(def no-footer-file (str shard-file ".verification-no-footer"))
-(def files [shard-file dedupe-file veri-file no-footer-file])
+(def files [clj-xet.constants/shard-file
+            clj-xet.constants/dedupe-file
+            clj-xet.constants/verification-file
+            clj-xet.constants/verification-no-footer-file])
 
 (def sha DigestUtils/sha256Hex)
 

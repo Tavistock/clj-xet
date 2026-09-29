@@ -49,32 +49,13 @@
 
 (comment
   (require '[clj-xet.util :as util]
-           '[clj-xet.constants :refer [csv-file]]
            '[clj-async-profiler.core :as prof]
            '[user :refer [time+]])
 
   (prof/profile
    #_{:event :alloc}
    (dotimes [_ 10]
-     (let [x (util/mapped-read-buffer (util/file-read-channel csv-file))]
+     (let [x (util/mapped-read-buffer (util/file-read-channel clj-xet.constants/csv-file))]
        (time+ (prn (count (chunk-lengths x)))))))
-
-
-
-  (defn next-position
-    ([^java.nio.ByteBuffer buffer] (next-position buffer 0 table mask))
-    ([^java.nio.ByteBuffer buffer ^long hash ^"[J" table ^long mask]
-     (loop [h hash
-            i 0]
-       (if-not (.hasRemaining buffer)
-         (.position buffer)
-         (let [b (.get buffer)
-               i (inc i)
-               h (unchecked-add (bit-shift-left h 1) (aget table b))]
-           (if (or (>= i max-chunk-size)
-                   (and (>= i min-chunk-size)
-                        (zero? (bit-and h mask))))
-             (.position buffer)
-             (recur h i)))))))
 
   :end)

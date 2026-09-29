@@ -20,25 +20,22 @@
 
 (defn chunk-entries [^FileChannel in-ch]
   (let [buffer (.map in-ch FileChannel$MapMode/READ_ONLY 0 (.size in-ch))]
-    (loop [^long len (gear-hash/buffer-next buffer)
-           offset (long 0)
+    (loop [offset (long 0)
            acc []]
-      (if (zero? len)
+      (if-not (.hasRemaining buffer)
         acc
-        (let [chunk-hash (hash/buffer-data-hash buffer offset len)
+        (let [len (gear-hash/next-chunk-length buffer)
+              chunk-hash (hash/buffer-data-hash buffer offset len)
               entry {:hash chunk-hash :length len}]
-          (recur (gear-hash/buffer-next buffer)
-                 (+ offset ^long len)
+          (recur (+ offset ^long len)
                  (conj acc entry)))))))
 
 (defn chunk-lengths [^ByteBuffer buffer]
   (loop [out (transient [])]
     (if (.hasRemaining buffer)
       (let [start-offset (.position buffer)
-            len          (gear-hash/buffer-next buffer)]
-        (if (zero? len)
-          (persistent! out)
-          (recur (conj! out [start-offset len]))))
+            len          (gear-hash/next-chunk-length buffer)]
+        (recur (conj! out [start-offset len])))
       (persistent! out))))
 
 (defn chunks-info [^ReadableByteChannel in-ch ^WritableByteChannel out-ch]
@@ -149,8 +146,10 @@
     (.position dest 0)
     dest))
 
-(defn encode [^ByteBuffer src ^WritableByteChannel dest]
-  (let [buffer (ByteBuffer/allocate (+ 8 max-chunk-size))]
+(defn encode
+  [^ByteBuffer src ^WritableByteChannel dest]
+  (let [buffer (ByteBuffer/allocate (+ 8 max-chunk-size
+                                       (quot max-chunk-size 255) 16))]
     (loop [[[^int offset ^int length] & offsets] (chunk-lengths src)]
       (if-not length
         dest
@@ -160,8 +159,6 @@
             (.write dest buffer))
           (.clear buffer)
           (recur offsets))))))
-
-
 
 (comment
   (require '[clj-async-profiler.core :as prof]

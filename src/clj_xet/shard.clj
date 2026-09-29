@@ -286,23 +286,3 @@
 
     ;; footer
     (when footer (sd/serialize shard-footer-serde out footer))))
-
-(comment
-  (def shard-file "xet-spec-reference-files/Electric_Vehicle_Population_Data_20250917.csv.shard")
-  (def dedupe-file                 (str shard-file ".dedupe"))
-  (def verification-file           (str shard-file ".verification"))
-  (def verification-no-footer-file (str shard-file ".verification-no-footer"))
-
-  (def out-file "example.shard")
-  (let [file dedupe-file]
-    (with-open [in (clojure.java.io/input-stream file)
-                out (clojure.java.io/output-stream out-file)]
-      (encode out (decode in))))
-
-  (defn create-footer [value]
-    {:file-info-offset 48,
-     :cas-info-offset 96,
-     :footer-offset 38400,
-     :version 1})
-  nil
-  :end)
