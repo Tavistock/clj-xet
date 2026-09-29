@@ -51,10 +51,16 @@
       (.update hasher (.getBytes s StandardCharsets/UTF_8)))
     (.doFinalize hasher 32)))
 
-(defn file-hash [hash]
-  (let [^Blake3 hasher (Blake3/initKeyedHash zero-key)]
+(defn file-hash-with-salt
+  "Computes the file hash of `hash` using `salt` (a 32-byte key) as the blake3
+   key. Passing `zero-key` as the salt yields the standard file hash."
+  [salt hash]
+  (let [^Blake3 hasher (Blake3/initKeyedHash salt)]
     (.update hasher hash)
     (.doFinalize hasher 32)))
+
+(defn file-hash [hash]
+  (file-hash-with-salt zero-key hash))
 
 (defn verification-hash [hashes]
   (let [^Blake3 hasher (Blake3/initKeyedHash verification-key)]

@@ -1,6 +1,6 @@
 (ns clj-xet.merkle
   (:require [clj-xet.util :refer [u64-le hash-0 hash-to-string]]
-            [clj-xet.hash :refer [internal-node-hash]]))
+            [clj-xet.hash :as hash]))
 
 (def ^:private mean-branching-factor 4)
 (def ^:private min-children 2)
@@ -24,7 +24,7 @@
   (let [strings (map (fn [{:keys [hash length]}]
                        (str (hash-to-string hash) " : " length "\n"))
                      hash-pairs)
-        new-hash (internal-node-hash strings)
+        new-hash (hash/internal-node-hash strings)
         new-length (reduce + (map :length hash-pairs))]
     {:hash new-hash :length new-length}))
 
@@ -44,3 +44,11 @@
       (if (= (count hv) 1)
         (:hash (first hv))
         (recur (branch hv))))))
+
+(defn file-hash-with-salt
+  "Computes the file hash for `entries` (a sequence of `{:hash :length}` maps)
+   using `salt` (a 32-byte key) as the blake3 key."
+  [salt entries]
+  (if (empty? entries)
+    hash-0
+    (hash/file-hash-with-salt salt (root entries))))
